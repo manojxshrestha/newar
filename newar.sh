@@ -27,19 +27,11 @@ echo -e "${RESET}"
 
 # Configuration
 CONFIG_FILE="${HOME}/.elite_recon.conf"
-WORDLIST_DIR="${WORDLIST_DIR:-/home/pwn/wordlists}" # Configurable wordlist directory
-OUTPUT_BASE="${OUTPUT_BASE:-./output}" # Base output directory
-THREADS="${THREADS:-10}" # Reduced default threads for stability
-EXT_PORTS="80,443,403,8080,8443,8000,8888,8081,8181,3306,5432,6379,27017,15672,10000,9090,5900" # Extended ports
-NUCLEI_TEMPLATES="${NUCLEI_TEMPLATES:-/home/pwn/wordlists/nuclei-templates}" # Configurable nuclei templates
-DOMAINS_FILE="${1:-}" # Input domains file
-NON_INTERACTIVE="${NON_INTERACTIVE:-false}" # Non-interactive mode flag
-
-# Wordlists
-DIR_WORDLIST="$WORDLIST_DIR/directory-list-2.3-medium.txt"
-API_WORDLIST="$WORDLIST_DIR/httparchive_apiroutes_2024_05_28.txt"
-PARAMS_WORDLIST="$WORDLIST_DIR/parameters.txt"
-SSRF_PAYLOADS="$WORDLIST_DIR/ssrf_payloads.txt"
+OUTPUT_BASE="${HOME}/Recon"
+THREADS="${THREADS:-10}"
+EXT_PORTS="80,443,403,8080,8443,8000,8888,8081,8181,3306,5432,6379,27017,15672,10000,9090,5900"
+NUCLEI_TEMPLATES="${NUCLEI_TEMPLATES:-/home/pwn/wordlists/nuclei-templates}"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 # Required tools
 REQUIRED_TOOLS=(
@@ -59,7 +51,7 @@ TEMP_SUBDOMAINS=$(mktemp)
 log() {
     local msg="$1"
     if [[ -n "${LOG_FILE:-}" ]]; then
-        mkdir -p "$(dirname "$LOG_FILE")" # Ensure log directory exists
+        mkdir -p "$(dirname "$LOG_FILE")"
         echo -e "$msg" | tee -a "$LOG_FILE"
     else
         echo -e "$msg"
@@ -70,7 +62,9 @@ log() {
 curl_with_retry() {
     local url=$1 output=$2 retries=3
     for ((i=1; i<=retries; i++)); do
-        curl -s --retry 3 --retry-delay 2 "$url" > "$output" && return 0
+        if curl -s --retry 3 --retry-delay 2 "$url" > "$output"; then
+            return 0
+        fi
         log "${YELLOW}[WARN] Failed to fetch $url (attempt $i/$retries). Retrying...${RESET}"
         sleep 2
     done
@@ -81,7 +75,7 @@ curl_with_retry() {
 # Validate domain input
 validate_domain() {
     local domain=$1
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
         log "${RED}[ERROR] Invalid domain: $domain${RESET}"
         return 1
     fi
@@ -170,36 +164,12 @@ check_nuclei_templates() {
 # Initialize output directory
 init_output() {
     local domain=$1
-    local domain_dir="$OUTPUT_BASE/$domain"
+    local domain_dir="$OUTPUT_BASE/$domain/$TIMESTAMP"
     LOG_FILE="$domain_dir/scan.log"
-
-    log "${GREEN}[INFO] Initializing output directory for $domain...${RESET}"
-    if [ -d "$domain_dir" ]; then
-        if [ "$NON_INTERACTIVE" = "true" ]; then
-            log "${YELLOW}[INFO] Non-interactive mode: Overwriting existing directory $domain_dir.${RESET}"
-            rm -rf "$domain_dir"
-        else
-            local overwrite_response=""
-            while true; do
-                read -rp "Output directory $domain_dir already exists. Overwrite? (y/n): " overwrite_response
-                case "${overwrite_response,,}" in
-                    y|yes)
-                        rm -rf "$domain_dir"
-                        break
-                        ;;
-                    n|no)
-                        log "${RED}[ERROR] Aborting to avoid overwriting existing data for $domain.${RESET}"
-                        return 1
-                        ;;
-                    *)
-                        log "${YELLOW}[WARN] Invalid input. Please enter 'y' for yes or 'n' for no.${RESET}"
-                        ;;
-                esac
-            done
-        fi
-    fi
+    
     mkdir -p "$domain_dir" "$domain_dir/waymore_responses" "$domain_dir/eyewitness"
     touch "$LOG_FILE"
+    log "${GREEN}[INFO] Output directory initialized at $domain_dir${RESET}"
 }
 
 # Subdomain enumeration
@@ -231,8 +201,12 @@ enumerate_subdomains() {
     fi
     wait
 
-    sort -u "$temp_subs" -o "$subs_file"
-    log "${GREEN}[INFO] Found $(wc -l < "$subs_file") unique subdomains for $domain.${RESET}"
+    if [ -s "$temp_subs" ]; then
+        sort -u "$temp_subs" -o "$subs_file"
+        log "${GREEN}[INFO] Found $(wc -l < "$subs_file") unique subdomains for $domain.${RESET}"
+    else
+        log "${YELLOW}[WARN] No subdomains found for $domain.${RESET}"
+    fi
 }
 
 # Probe live hosts
@@ -271,8 +245,8 @@ gather_urls() {
         if [ -s "$domain_dir/waymore_urls.txt" ]; then
             cat "$domain_dir/waymore_urls.txt" >> "$urls_file"
         fi
-        sort -u "$urls_file" -o "$urls_file"
         if [ -s "$urls_file" ]; then
+            sort -u "$urls_file" -o "$urls_file"
             log "${GREEN}[INFO] Collected $(wc -l < "$urls_file") URLs.${RESET}"
         else
             log "${YELLOW}[WARN] No URLs collected. Check $domain_dir/waymore.log.${RESET}"
@@ -309,17 +283,21 @@ extract_js() {
     local js_endpoints_file="$domain_dir/js_endpoints.txt"
 
     log "${GREEN}[INFO] Extracting JS files and endpoints with getJS...${RESET}"
-    grep -Eo 'https?://[^ ]+\.js' "$urls_file" | sort -u > "$js_files_file"
-    if [ -s "$js_files_file" ]; then
-        getJS --input "$js_files_file" --output "$js_endpoints_file" --resolve --insecure --verbose >"$domain_dir/getjs.log" 2>&1 &
-        wait
-        if [ -s "$js_endpoints_file" ]; then
-            log "${GREEN}[INFO] Extracted $(wc -l < "$js_files_file") JS files and endpoints.${RESET}"
+    if [ -s "$urls_file" ]; then
+        grep -Eo 'https?://[^ ]+\.js' "$urls_file" | sort -u > "$js_files_file"
+        if [ -s "$js_files_file" ]; then
+            getJS --input "$js_files_file" --output "$js_endpoints_file" --resolve --insecure --verbose >"$domain_dir/getjs.log" 2>&1 &
+            wait
+            if [ -s "$js_endpoints_file" ]; then
+                log "${GREEN}[INFO] Extracted $(wc -l < "$js_files_file") JS files and endpoints.${RESET}"
+            else
+                log "${YELLOW}[WARN] getJS failed to extract endpoints. Check $domain_dir/getjs.log.${RESET}"
+            fi
         else
-            log "${YELLOW}[WARN] getJS failed to extract endpoints. Check $domain_dir/getjs.log.${RESET}"
+            log "${YELLOW}[WARN] No JS files found in $urls_file.${RESET}"
         fi
     else
-        log "${YELLOW}[WARN] No JS files found in $urls_file.${RESET}"
+        log "${YELLOW}[WARN] No URLs found for JS extraction.${RESET}"
     fi
 }
 
@@ -901,7 +879,7 @@ analyze_jwt() {
 # Process domain
 process_domain() {
     local domain=$1
-    local domain_dir="$OUTPUT_BASE/$domain"
+    local domain_dir="$OUTPUT_BASE/$domain/$TIMESTAMP"
 
     if ! validate_domain "$domain"; then
         return 1
@@ -909,9 +887,7 @@ process_domain() {
 
     log "${GREEN}[INFO] Starting scan for domain: $domain${RESET}"
 
-    if ! init_output "$domain"; then
-        return 1
-    fi
+    init_output "$domain"
     enumerate_subdomains "$domain" "$domain_dir"
     probe_live_hosts "$domain_dir"
     gather_urls "$domain" "$domain_dir"
@@ -949,7 +925,7 @@ process_domain() {
 # Generate summary report
 generate_report() {
     local domain=$1
-    local domain_dir="$OUTPUT_BASE/$domain"
+    local domain_dir="$OUTPUT_BASE/$domain/$TIMESTAMP"
     local report_file="$domain_dir/summary_report.txt"
 
     {
@@ -968,29 +944,43 @@ generate_report() {
 
 # Main execution
 main() {
-    trap 'rm -f "$GAU_FILE" "$JS_FILE" "$WAYBACK_FILE" "$TEMP_SUBDOMAINS" "$OUTPUT_BASE"/*/crtsh.json "$OUTPUT_BASE"/*/otx.json "$OUTPUT_BASE"/*/ssrf_temp_*.txt; log "${YELLOW}[INFO] Cleaned up temporary files.${RESET}"' EXIT INT TERM
+    trap 'rm -f "$GAU_FILE" "$JS_FILE" "$WAYBACK_FILE" "$TEMP_SUBDOMAINS"; log "${YELLOW}[INFO] Cleaned up temporary files.${RESET}"' EXIT INT TERM
+
+    # Prompt for domain or subdomains list
+    echo -n "Enter the domain or subdomains list: "
+    read -r DOMAIN_INPUT
+    if [[ -z "$DOMAIN_INPUT" ]]; then
+        log "${RED}[ERROR] No domain or subdomains list provided.${RESET}"
+        exit 1
+    fi
+
+    # Prompt for wordlist path
+    echo -n "Enter path to wordlist: "
+    read -r WORDLIST_DIR
+    if [[ -z "$WORDLIST_DIR" ]] || [[ ! -d "$WORDLIST_DIR" ]]; then
+        log "${RED}[ERROR] Invalid or missing wordlist directory: $WORDLIST_DIR${RESET}"
+        exit 1
+    fi
+
+    # Set wordlist paths
+    DIR_WORDLIST="$WORDLIST_DIR/directory-list-2.3-medium.txt"
+    API_WORDLIST="$WORDLIST_DIR/httparchive_apiroutes_2024_05_28.txt"
+    PARAMS_WORDLIST="$WORDLIST_DIR/parameters.txt"
+    SSRF_PAYLOADS="$WORDLIST_DIR/ssrf_payloads.txt"
+
+    # Check if input is a file or a single domain
+    if [[ -f "$DOMAIN_INPUT" ]]; then
+        DOMAINS_FILE="$DOMAIN_INPUT"
+    else
+        # Create a temporary file for a single domain
+        DOMAINS_FILE=$(mktemp)
+        echo "$DOMAIN_INPUT" > "$DOMAINS_FILE"
+        trap 'rm -f "$DOMAINS_FILE"; rm -f "$GAU_FILE" "$JS_FILE" "$WAYBACK_FILE" "$TEMP_SUBDOMAINS"; log "${YELLOW}[INFO] Cleaned up temporary files.${RESET}"' EXIT INT TERM
+    fi
 
     check_tools
     check_wordlists
     check_nuclei_templates
-
-    if [ -z "$DOMAINS_FILE" ]; then
-        if [ "$NON_INTERACTIVE" = "true" ]; then
-            log "${RED}[ERROR] Domains file or domain must be provided in non-interactive mode.${RESET}"
-            exit 1
-        fi
-        read -rp "Enter the target domain or domains list file: " INPUT
-        if [ -z "$INPUT" ]; then
-            log "${RED}[ERROR] Input cannot be empty.${RESET}"
-            exit 1
-        fi
-        if [ -f "$INPUT" ]; then
-            DOMAINS_FILE="$INPUT"
-        else
-            echo "$INPUT" > /tmp/domains.txt
-            DOMAINS_FILE="/tmp/domains.txt"
-        fi
-    fi
 
     if [ ! -f "$DOMAINS_FILE" ]; then
         log "${RED}[ERROR] Domains file $DOMAINS_FILE not found.${RESET}"
@@ -1006,7 +996,7 @@ main() {
                 ((processed_domains++))
             else
                 ((skipped_domains++))
-                log "${YELLOW}[INFO] Skipped processing for $domain.${RESET}"
+                log "${YELLOW}[INFO] Skipped processing for $domain due to validation failure.${RESET}"
             fi
         fi
     done < "$DOMAINS_FILE"
